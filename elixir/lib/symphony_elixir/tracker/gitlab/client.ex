@@ -1,0 +1,261 @@
+defmodule SymphonyElixir.Tracker.GitLab.Client do
+  @moduledoc """
+  GitLab REST client for issue/merge-request polling and updates.
+  """
+
+  require Logger
+
+  alias SymphonyElixir.{Project, Tracker.Issue}
+
+  @per_page 100
+
+  @spec fetch_candidate_issues(Project.t()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_candidate_issues(%Project{} = project) do
+    with {:ok, headers, base_url, project_ref} <- request_context(project),
+         {:ok, issues} <- request(:get, base_url, "/api/v4/projects/#{project_ref}/issues", headers, %{"state" => "all", "per_page" => @per_page}),
+         {:ok, merge_requests} <-
+           request(:get, base_url, "/api/v4/projects/#{project_ref}/merge_requests", headers, %{"state" => "all", "per_page" => @per_page}) do
+      normalized = Enum.map(issues, &normalize_issue/1) ++ Enum.map(merge_requests, &normalize_merge_request/1)
+      {:ok, normalized}
+    end
+  end
+
+  @spec fetch_issue_states_by_ids(Project.t(), [String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issue_states_by_ids(%Project{} = project, issue_ids) when is_list(issue_ids) do
+    with {:ok, headers, base_url, project_ref} <- request_context(project) do
+      issue_ids
+      |> Enum.uniq()
+      |> Enum.reduce_while({:ok, []}, fn issue_id, {:ok, acc} ->
+        case parse_issue_key(issue_id) do
+          {:ok, :issue, iid} ->
+            path = "/api/v4/projects/#{project_ref}/issues/#{iid}"
+
+            case request(:get, base_url, path, headers, nil) do
+              {:ok, issue} -> {:cont, {:ok, [normalize_issue(issue) | acc]}}
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
+
+          {:ok, :merge_request, iid} ->
+            path = "/api/v4/projects/#{project_ref}/merge_requests/#{iid}"
+
+            case request(:get, base_url, path, headers, nil) do
+              {:ok, merge_request} -> {:cont, {:ok, [normalize_merge_request(merge_request) | acc]}}
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
+
+          {:error, _reason} ->
+            {:cont, {:ok, acc}}
+        end
+      end)
+      |> case do
+        {:ok, issues} -> {:ok, Enum.reverse(issues)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  @spec create_comment(Project.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def create_comment(%Project{} = project, issue_id, body)
+      when is_binary(issue_id) and is_binary(body) do
+    with {:ok, headers, base_url, project_ref} <- request_context(project),
+         {:ok, type, iid} <- parse_issue_key(issue_id),
+         path <- notes_path(project_ref, type, iid),
+         {:ok, _} <- request(:post, base_url, path, headers, %{"body" => body}) do
+      :ok
+    end
+  end
+
+  @spec update_issue_state(Project.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def update_issue_state(%Project{} = project, issue_id, state_name)
+      when is_binary(issue_id) and is_binary(state_name) do
+    state_event =
+      case String.downcase(String.trim(state_name)) do
+        "closed" -> "close"
+        "open" -> "reopen"
+        "opened" -> "reopen"
+        _ -> nil
+      end
+
+    with {:ok, headers, base_url, project_ref} <- request_context(project),
+         {:ok, type, iid} <- parse_issue_key(issue_id),
+         true <- not is_nil(state_event),
+         path <- update_path(project_ref, type, iid),
+         {:ok, _} <- request(:put, base_url, path, headers, %{"state_event" => state_event}) do
+      :ok
+    else
+      false -> {:error, :invalid_issue_state}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec request_context(Project.t()) :: {:ok, [{String.t(), String.t()}], String.t(), String.t()} | {:error, term()}
+  defp request_context(%Project{provider_config: provider_config}) do
+    token_env = provider_config["token_env"] || "GITLAB_TOKEN"
+    token = System.get_env(token_env)
+    base_url = provider_config["base_url"] || Project.default_gitlab_base_url()
+
+    project_ref =
+      cond do
+        not blank?(provider_config["project_id"]) -> provider_config["project_id"]
+        not blank?(provider_config["project_path"]) -> URI.encode_www_form(provider_config["project_path"])
+        true -> nil
+      end
+
+    cond do
+      blank?(token) ->
+        {:error, :missing_gitlab_token}
+
+      blank?(project_ref) ->
+        {:error, :missing_gitlab_project_ref}
+
+      true ->
+        headers = [
+          {"PRIVATE-TOKEN", token},
+          {"Content-Type", "application/json"}
+        ]
+
+        {:ok, headers, String.trim_trailing(base_url, "/"), project_ref}
+    end
+  end
+
+  @spec request(atom(), String.t(), String.t(), [{String.t(), String.t()}], map() | nil) ::
+          {:ok, map() | [map()]} | {:error, term()}
+  defp request(method, base_url, path, headers, payload) do
+    url = base_url <> path
+
+    options = [headers: headers, connect_options: [timeout: 30_000]]
+
+    response =
+      case method do
+        :get -> Req.get(url, Keyword.put(options, :params, payload || %{}))
+        :post -> Req.post(url, Keyword.put(options, :json, payload || %{}))
+        :put -> Req.put(url, Keyword.put(options, :json, payload || %{}))
+      end
+
+    case response do
+      {:ok, %{status: status, body: body}} when status in 200..299 ->
+        {:ok, body}
+
+      {:ok, %{status: 401}} ->
+        {:error, :unauthorized}
+
+      {:ok, %{status: 403}} ->
+        {:error, :forbidden}
+
+      {:ok, %{status: 429, headers: headers}} ->
+        {:error, {:rate_limited, retry_after_ms(headers)}}
+
+      {:ok, %{status: status, body: body}} when status >= 500 ->
+        Logger.error("GitLab API server error status=#{status} body=#{inspect(body)}")
+        {:error, {:server_error, status}}
+
+      {:ok, %{status: status, body: body}} ->
+        {:error, {:http_error, status, body}}
+
+      {:error, reason} ->
+        {:error, {:request_failed, reason}}
+    end
+  end
+
+  @spec retry_after_ms([{String.t(), String.t()}]) :: non_neg_integer()
+  defp retry_after_ms(headers) do
+    headers
+    |> Enum.find_value(fn {key, value} -> if String.downcase(key) == "retry-after", do: value end)
+    |> case do
+      nil ->
+        60_000
+
+      value ->
+        case Integer.parse(value) do
+          {seconds, _} -> max(seconds, 1) * 1_000
+          _ -> 60_000
+        end
+    end
+  end
+
+  @spec normalize_issue(map()) :: Issue.t()
+  defp normalize_issue(issue) do
+    iid = to_string(Map.get(issue, "iid"))
+
+    %Issue{
+      id: "issue:" <> iid,
+      identifier: "#" <> iid,
+      title: Map.get(issue, "title") || "",
+      description: Map.get(issue, "description"),
+      state: Map.get(issue, "state") || "unknown",
+      url: Map.get(issue, "web_url"),
+      updated_at: parse_datetime(Map.get(issue, "updated_at")),
+      branch_name: nil,
+      source: :issue,
+      labels: normalize_labels(Map.get(issue, "labels", []))
+    }
+  end
+
+  @spec normalize_merge_request(map()) :: Issue.t()
+  defp normalize_merge_request(merge_request) do
+    iid = to_string(Map.get(merge_request, "iid"))
+
+    %Issue{
+      id: "mr:" <> iid,
+      identifier: "MR!" <> iid,
+      title: Map.get(merge_request, "title") || "",
+      description: Map.get(merge_request, "description"),
+      state: Map.get(merge_request, "state") || "unknown",
+      url: Map.get(merge_request, "web_url"),
+      updated_at: parse_datetime(Map.get(merge_request, "updated_at")),
+      branch_name: Map.get(merge_request, "source_branch"),
+      source: :pull_request,
+      labels: normalize_labels(Map.get(merge_request, "labels", []))
+    }
+  end
+
+  @spec normalize_labels(term()) :: [String.t()]
+  defp normalize_labels(labels) when is_list(labels) do
+    labels
+    |> Enum.map(fn
+      value when is_binary(value) -> String.downcase(value)
+      _ -> nil
+    end)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp normalize_labels(_), do: []
+
+  @spec parse_issue_key(String.t()) :: {:ok, :issue | :merge_request, String.t()} | {:error, term()}
+  defp parse_issue_key(issue_id) do
+    case String.split(issue_id, ":", parts: 2) do
+      ["issue", iid] -> {:ok, :issue, iid}
+      ["mr", iid] -> {:ok, :merge_request, iid}
+      _ -> {:error, :invalid_issue_id}
+    end
+  end
+
+  @spec notes_path(String.t(), :issue | :merge_request, String.t()) :: String.t()
+  defp notes_path(project_ref, :issue, iid), do: "/api/v4/projects/#{project_ref}/issues/#{iid}/notes"
+  defp notes_path(project_ref, :merge_request, iid), do: "/api/v4/projects/#{project_ref}/merge_requests/#{iid}/notes"
+
+  @spec update_path(String.t(), :issue | :merge_request, String.t()) :: String.t()
+  defp update_path(project_ref, :issue, iid), do: "/api/v4/projects/#{project_ref}/issues/#{iid}"
+
+  defp update_path(project_ref, :merge_request, iid),
+    do: "/api/v4/projects/#{project_ref}/merge_requests/#{iid}"
+
+  @spec parse_datetime(term()) :: DateTime.t() | nil
+  defp parse_datetime(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      _ -> nil
+    end
+  end
+
+  defp parse_datetime(_), do: nil
+
+  @spec blank?(term()) :: boolean()
+  defp blank?(nil), do: true
+
+  defp blank?(value) when is_binary(value) do
+    String.trim(value) == ""
+  end
+
+  defp blank?(_), do: false
+end

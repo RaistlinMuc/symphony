@@ -10,6 +10,26 @@ _In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Line
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 
+## Fork Changes (RaistlinMuc)
+
+This fork extends the Elixir implementation with a practical multi-project monitor for Git-based
+ticket workflows.
+
+Implemented additions:
+
+- Multi-project discovery from local Codex state (`~/.codex/.codex-global-state.json`)
+- Monitored project CRUD persisted at `~/.codex/symphony/projects.json`
+- GitHub and GitLab tracker adapters (including `https://git.pq-computers.com`)
+- Dashboard sections for discovered and monitored projects
+- New REST endpoints under `/api/v1/projects/*`
+- Per-project run mode (`build_only` and `full_agent` config values)
+
+Notes:
+
+- Legacy Linear-based single-workflow mode remains available.
+- In the current fork state, `build_only` is fully wired. `full_agent` is present as a mode and
+  config path and currently executes the same build job pipeline.
+
 ## Running Symphony
 
 ### Requirements
@@ -33,6 +53,9 @@ help with the setup:
 
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
+
+For this fork-specific behavior and APIs, see the added sections in
+[elixir/README.md](elixir/README.md).
 
 ---
 
