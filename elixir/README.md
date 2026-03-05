@@ -26,6 +26,67 @@ skills can make raw Linear GraphQL calls.
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
+## Multi-project mode (GitHub + GitLab)
+
+In addition to the legacy single-workflow Linear orchestration, Symphony now includes a built-in
+multi-project monitor:
+
+- Project discovery from `~/.codex/.codex-global-state.json`
+- Persistent monitored-project registry at `~/.codex/symphony/projects.json`
+- Provider support for GitHub and GitLab trackers
+- Per-project execution mode: `build_only` or `full_agent`
+
+New API endpoints:
+
+- `GET /api/v1/projects/discovered`
+- `GET /api/v1/projects`
+- `POST /api/v1/projects`
+- `PUT /api/v1/projects/:id`
+- `DELETE /api/v1/projects/:id`
+- `POST /api/v1/projects/:id/enable`
+- `POST /api/v1/projects/:id/disable`
+- `GET /api/v1/projects/:id/readiness`
+- `GET /api/v1/projects/status`
+
+The dashboard at `/` now includes sections for discovered and monitored projects.
+
+### Active in Codex
+
+In discovered-project tables, `Active in Codex` currently means:
+
+- the path exists in `active-workspace-roots` inside `~/.codex/.codex-global-state.json`
+
+This is different from merely being known/saved in Codex (`electron-saved-workspace-roots`).
+
+### Project readiness and tokens
+
+A monitored project is marked as `needs_input` until required fields and tokens are available.
+
+Typical missing field:
+
+- `provider_config.token`
+
+That means the configured environment variable (for example `GITHUB_TOKEN` or `GITLAB_TOKEN`) is
+not set in the running Symphony process environment.
+
+For GitHub projects in this fork, Symphony also falls back to `gh auth token` when the GitHub CLI
+is already logged in locally.
+
+Example startup with tokens:
+
+```bash
+export GITHUB_TOKEN=ghp_...
+export GITLAB_TOKEN=glpat-...
+mise exec -- ./bin/symphony ./WORKFLOW.md --port 4100 --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
+
+### Fork status and current limitations
+
+- `build_only` mode is fully implemented (poll -> build commands -> post result comment).
+- `full_agent` is available as a project mode/config value and currently runs through the same
+  build job path in this fork revision.
+- The existing Linear single-workflow path remains available for legacy usage.
+
 ## How to use it
 
 1. Make sure your codebase is set up to work well with agents: see

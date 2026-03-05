@@ -111,6 +111,8 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: entry.codex_total_tokens
       }
     }
+    |> maybe_put(:project_id, Map.get(entry, :project_id))
+    |> maybe_put(:project_name, Map.get(entry, :project_name))
   end
 
   defp retry_entry_payload(entry) do
@@ -121,6 +123,8 @@ defmodule SymphonyElixirWeb.Presenter do
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error
     }
+    |> maybe_put(:project_id, Map.get(entry, :project_id))
+    |> maybe_put(:project_name, Map.get(entry, :project_name))
   end
 
   defp running_issue_payload(running) do
@@ -178,4 +182,7 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp iso8601(_datetime), do: nil
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 end

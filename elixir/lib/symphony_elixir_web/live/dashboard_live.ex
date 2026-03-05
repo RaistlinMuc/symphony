@@ -5,6 +5,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.{Project, ProjectDiscovery, ProjectRegistry}
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
@@ -244,13 +245,129 @@ defmodule SymphonyElixirWeb.DashboardLive do
             </div>
           <% end %>
         </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Monitored projects</h2>
+              <p class="section-copy">Configured projects with readiness and mode.</p>
+            </div>
+          </div>
+
+          <%= if @payload.projects == [] do %>
+            <p class="empty-state">No monitored projects configured.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table" style="min-width: 900px;">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Provider</th>
+                    <th>Mode</th>
+                    <th>State</th>
+                    <th>Repo</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr :for={project <- @payload.projects}>
+                    <td><%= project.name %></td>
+                    <td><%= project.provider %></td>
+                    <td><%= project.mode %></td>
+                    <td>
+                      <span class={if project.readiness.ready and project.enabled, do: "state-badge state-badge-active", else: "state-badge state-badge-warning"}>
+                        <%= project_status_label(project) %>
+                      </span>
+                      <div :if={project.readiness.missing_fields != []} class="muted">
+                        missing: <%= Enum.join(project.readiness.missing_fields, ", ") %>
+                      </div>
+                    </td>
+                    <td class="mono"><%= project.repo_path %></td>
+                    <td>
+                      <div class="detail-stack">
+                        <button
+                          type="button"
+                          class="subtle-button"
+                          data-url={"/api/v1/projects/#{project.id}/#{if project.enabled, do: "disable", else: "enable"}"}
+                          onclick="fetch(this.dataset.url, {method: 'POST'}).then(() => window.location.reload())"
+                        >
+                          <%= if project.enabled, do: "Disable", else: "Enable" %>
+                        </button>
+                        <button
+                          type="button"
+                          class="subtle-button"
+                          data-url={"/api/v1/projects/#{project.id}"}
+                          onclick="if (confirm('Delete project?')) { fetch(this.dataset.url, {method: 'DELETE'}).then(() => window.location.reload()) }"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Discovered projects</h2>
+              <p class="section-copy">Detected from Codex workspace roots, sorted by latest activity.</p>
+            </div>
+          </div>
+
+          <%= if @payload.discovered_projects == [] do %>
+            <p class="empty-state">No Git repositories discovered from Codex state.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table" style="min-width: 980px;">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Active in Codex</th>
+                    <th>Branch</th>
+                    <th>Last changed</th>
+                    <th>Path</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr :for={project <- @payload.discovered_projects}>
+                    <td><%= project.name %></td>
+                    <td><%= if project.is_active, do: "yes", else: "no" %></td>
+                    <td><%= project.git.branch || "n/a" %></td>
+                    <td class="mono"><%= project.git.last_changed_at || "n/a" %></td>
+                    <td class="mono"><%= project.path %></td>
+                    <td>
+                      <button
+                        type="button"
+                        class="subtle-button"
+                        data-payload={Jason.encode!(default_create_payload(project))}
+                        onclick="fetch('/api/v1/projects', {method: 'POST', headers: {'content-type': 'application/json'}, body: this.dataset.payload}).then(() => window.location.reload())"
+                      >
+                        Monitor
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
+        </section>
       <% end %>
     </section>
     """
   end
 
   defp load_payload do
-    Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
+    payload = Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
+
+    Map.merge(payload, %{
+      projects: monitored_projects_payload(),
+      discovered_projects: ProjectDiscovery.list()
+    })
   end
 
   defp orchestrator do
@@ -327,4 +444,96 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp pretty_value(nil), do: "n/a"
   defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)
+
+  defp monitored_projects_payload do
+    ProjectRegistry.list()
+    |> Enum.map(fn project ->
+      %{
+        id: project.id,
+        name: project.name,
+        provider: project.provider,
+        mode: project.mode,
+        enabled: project.enabled,
+        repo_path: project.repo_path,
+        readiness: Project.readiness(project)
+      }
+    end)
+  end
+
+  defp default_create_payload(discovered_project) do
+    %{path: path, git: git} = discovered_project
+    remote = List.first(git.remote_urls || [])
+    provider = default_provider_from_remote(remote)
+
+    %{
+      name: discovered_project.name,
+      repo_path: path,
+      enabled: true,
+      mode: "build_only",
+      provider: provider,
+      provider_config: default_provider_config(provider, remote),
+      build: %{"commands" => ["make test"], "workdir" => nil, "timeout_ms" => 900_000},
+      ticket_mapping: %{"defaults_profile" => if(provider == "gitlab", do: "gitlab_default", else: "github_default"), "overrides" => %{}}
+    }
+  end
+
+  defp default_provider_from_remote(remote) when is_binary(remote) do
+    if String.contains?(String.downcase(remote), "git.pq-computers.com"), do: "gitlab", else: "github"
+  end
+
+  defp default_provider_from_remote(_), do: "github"
+
+  defp default_provider_config("gitlab", remote) do
+    %{
+      "base_url" => "https://git.pq-computers.com",
+      "project_path" => parse_gitlab_project_path(remote),
+      "project_id" => nil,
+      "token_env" => "GITLAB_TOKEN"
+    }
+  end
+
+  defp default_provider_config("github", remote) do
+    {owner, repo} = parse_github_owner_repo(remote)
+
+    %{
+      "owner" => owner,
+      "repo" => repo,
+      "api_base_url" => "https://api.github.com",
+      "token_env" => "GITHUB_TOKEN"
+    }
+  end
+
+  defp parse_github_owner_repo(remote) when is_binary(remote) do
+    normalized = remote |> String.replace("git@github.com:", "https://github.com/") |> String.trim_trailing(".git")
+
+    case URI.parse(normalized) do
+      %URI{host: "github.com", path: path} when is_binary(path) ->
+        case String.split(String.trim_leading(path, "/"), "/", parts: 3) do
+          [owner, repo | _] -> {owner, repo}
+          _ -> {nil, nil}
+        end
+
+      _ ->
+        {nil, nil}
+    end
+  end
+
+  defp parse_github_owner_repo(_), do: {nil, nil}
+
+  defp parse_gitlab_project_path(remote) when is_binary(remote) do
+    remote
+    |> String.replace("git@git.pq-computers.com:", "")
+    |> String.replace("https://git.pq-computers.com/", "")
+    |> String.trim_trailing(".git")
+  end
+
+  defp parse_gitlab_project_path(_), do: nil
+
+  defp project_status_label(project) do
+    cond do
+      not project.enabled -> "disabled"
+      project.readiness.ready -> "ready"
+      true -> "needs_input"
+    end
+  end
 end
