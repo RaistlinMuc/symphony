@@ -56,8 +56,7 @@ defmodule SymphonyElixir.ProjectDiscovery do
       path when is_binary(path) -> String.trim(path)
       _ -> nil
     end)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.reject(&(&1 == ""))
+    |> Enum.reject(&(is_nil(&1) or &1 == ""))
     |> Enum.map(&Path.expand/1)
     |> Enum.filter(&File.dir?/1)
   end

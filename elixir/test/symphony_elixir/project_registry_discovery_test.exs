@@ -2,6 +2,7 @@ defmodule SymphonyElixir.ProjectRegistryDiscoveryTest do
   use ExUnit.Case
 
   alias SymphonyElixir.{Project, ProjectDiscovery, ProjectRegistry}
+  alias SymphonyElixir.Tracker.GitHub.Auth, as: GitHubAuth
 
   setup do
     tmp_root = Path.join(System.tmp_dir!(), "symphony-multi-#{System.unique_integer([:positive])}")
@@ -117,6 +118,28 @@ defmodule SymphonyElixir.ProjectRegistryDiscoveryTest do
 
     assert Enum.any?(discovered, fn entry -> entry.path == Path.expand(passive_repo) end)
     refute Enum.any?(discovered, fn entry -> entry.path == Path.expand(non_repo) end)
+  end
+
+  test "github auth falls back to gh cli token", %{tmp_root: tmp_root} do
+    bin_dir = Path.join(tmp_root, "bin")
+    gh_path = Path.join(bin_dir, "gh")
+    File.mkdir_p!(bin_dir)
+    File.write!(gh_path, "#!/bin/sh\necho gho_test_token\n")
+    File.chmod!(gh_path, 0o755)
+
+    previous_path = System.get_env("PATH")
+    previous_token = System.get_env("GITHUB_TOKEN")
+
+    System.put_env("PATH", bin_dir <> ":" <> (previous_path || ""))
+    System.delete_env("GITHUB_TOKEN")
+
+    on_exit(fn ->
+      if is_nil(previous_path), do: System.delete_env("PATH"), else: System.put_env("PATH", previous_path)
+      if is_nil(previous_token), do: System.delete_env("GITHUB_TOKEN"), else: System.put_env("GITHUB_TOKEN", previous_token)
+    end)
+
+    assert {:ok, "gho_test_token"} = GitHubAuth.token("GITHUB_TOKEN")
+    assert GitHubAuth.available?("GITHUB_TOKEN")
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

@@ -290,33 +290,37 @@ defmodule SymphonyElixir.MultiProjectOrchestrator do
   defp run_build(%Project{} = project) do
     commands = Map.get(project.build, "commands", [])
     timeout_ms = Map.get(project.build, "timeout_ms", 900_000)
-    working_dir = build_working_dir(project)
+    build_result(commands, build_working_dir(project), timeout_ms)
+  end
 
-    if commands == [] do
-      {:ok, %{summary: "no build commands configured", output: ""}}
-    else
-      commands
-      |> Enum.reduce_while({:ok, []}, fn command, {:ok, outputs} ->
-        case run_command(command, working_dir, timeout_ms) do
-          {:ok, output} -> {:cont, {:ok, outputs ++ ["$ #{command}\n#{output}"]}}
-          {:error, reason} -> {:halt, {:error, {:command_failed, command, reason, outputs}}}
-        end
-      end)
-      |> case do
-        {:ok, outputs} ->
-          output = Enum.join(outputs, "\n\n")
+  defp build_result([], _working_dir, _timeout_ms) do
+    {:ok, %{summary: "no build commands configured", output: ""}}
+  end
 
-          {:ok,
-           %{
-             summary: "build passed (#{length(commands)} commands)",
-             output: truncate_output(output)
-           }}
+  defp build_result(commands, working_dir, timeout_ms) do
+    case run_commands(commands, working_dir, timeout_ms) do
+      {:ok, outputs} ->
+        output = Enum.join(outputs, "\n\n")
 
-        {:error, {:command_failed, command, reason, outputs}} ->
-          output = Enum.join(outputs, "\n\n")
-          {:error, {:command_failed, command, reason, truncate_output(output)}}
-      end
+        {:ok,
+         %{
+           summary: "build passed (#{length(commands)} commands)",
+           output: truncate_output(output)
+         }}
+
+      {:error, {:command_failed, command, reason, outputs}} ->
+        output = Enum.join(outputs, "\n\n")
+        {:error, {:command_failed, command, reason, truncate_output(output)}}
     end
+  end
+
+  defp run_commands(commands, working_dir, timeout_ms) do
+    Enum.reduce_while(commands, {:ok, []}, fn command, {:ok, outputs} ->
+      case run_command(command, working_dir, timeout_ms) do
+        {:ok, output} -> {:cont, {:ok, outputs ++ ["$ #{command}\n#{output}"]}}
+        {:error, reason} -> {:halt, {:error, {:command_failed, command, reason, outputs}}}
+      end
+    end)
   end
 
   @spec run_command(String.t(), String.t(), non_neg_integer()) :: {:ok, String.t()} | {:error, term()}
@@ -337,7 +341,11 @@ defmodule SymphonyElixir.MultiProjectOrchestrator do
     error -> {:error, {:command_error, error}}
   end
 
-  @spec post_result_comment(Project.t(), Issue.t(), %{summary: String.t(), output: String.t()}) :: :ok | {:error, term()}
+  @spec post_result_comment(
+          Project.t(),
+          Issue.t(),
+          %{summary: String.t(), output: String.t()}
+        ) :: :ok | {:error, term()}
   defp post_result_comment(project, issue, build_result) do
     mode_line = if project.mode == "full_agent", do: "full_agent", else: "build_only"
 

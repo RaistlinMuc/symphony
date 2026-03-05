@@ -189,9 +189,8 @@ defmodule SymphonyElixir.ProjectRegistry do
     }
 
     with :ok <- File.mkdir_p(Path.dirname(path)),
-         {:ok, json} <- Jason.encode(payload, pretty: true),
-         :ok <- File.write(path, json <> "\n") do
-      :ok
+         {:ok, json} <- Jason.encode(payload, pretty: true) do
+      File.write(path, json <> "\n")
     end
   end
 

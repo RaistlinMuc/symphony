@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Tracker.GitHub.Client do
   require Logger
 
   alias SymphonyElixir.{Project, Tracker.Issue}
+  alias SymphonyElixir.Tracker.GitHub.Auth
 
   @per_page 100
 
@@ -20,24 +21,7 @@ defmodule SymphonyElixir.Tracker.GitHub.Client do
   @spec fetch_issue_states_by_ids(Project.t(), [String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids(%Project{} = project, issue_ids) when is_list(issue_ids) do
     with {:ok, _token, headers, base_url, owner, repo} <- request_context(project) do
-      issue_ids
-      |> Enum.uniq()
-      |> Enum.reduce_while({:ok, []}, fn issue_id, {:ok, acc} ->
-        case parse_issue_number(issue_id) do
-          {:ok, number} ->
-            case request(:get, base_url, "/repos/#{owner}/#{repo}/issues/#{number}", headers, nil) do
-              {:ok, issue} -> {:cont, {:ok, [normalize_issue(issue) | acc]}}
-              {:error, reason} -> {:halt, {:error, reason}}
-            end
-
-          {:error, _reason} ->
-            {:cont, {:ok, acc}}
-        end
-      end)
-      |> case do
-        {:ok, issues} -> {:ok, Enum.reverse(issues)}
-        {:error, reason} -> {:error, reason}
-      end
+      fetch_issue_states(issue_ids, base_url, owner, repo, headers)
     end
   end
 
@@ -87,8 +71,6 @@ defmodule SymphonyElixir.Tracker.GitHub.Client do
     base_url = provider_config["api_base_url"] || Project.default_github_api_base_url()
     token_env = provider_config["token_env"] || "GITHUB_TOKEN"
 
-    token = System.get_env(token_env)
-
     cond do
       blank?(owner) ->
         {:error, :missing_github_owner}
@@ -96,17 +78,16 @@ defmodule SymphonyElixir.Tracker.GitHub.Client do
       blank?(repo) ->
         {:error, :missing_github_repo}
 
-      blank?(token) ->
-        {:error, :missing_github_token}
-
       true ->
-        headers = [
-          {"Authorization", "Bearer #{token}"},
-          {"Accept", "application/vnd.github+json"},
-          {"X-GitHub-Api-Version", "2022-11-28"}
-        ]
+        with {:ok, token} <- Auth.token(token_env) do
+          headers = [
+            {"Authorization", "Bearer #{token}"},
+            {"Accept", "application/vnd.github+json"},
+            {"X-GitHub-Api-Version", "2022-11-28"}
+          ]
 
-        {:ok, token, headers, String.trim_trailing(base_url, "/"), owner, repo}
+          {:ok, token, headers, String.trim_trailing(base_url, "/"), owner, repo}
+        end
     end
   end
 
@@ -132,17 +113,28 @@ defmodule SymphonyElixir.Tracker.GitHub.Client do
   @spec request(atom(), String.t(), String.t(), [{String.t(), String.t()}], map() | nil) ::
           {:ok, map() | [map()]} | {:error, term()}
   defp request(method, base_url, path, headers, payload) do
-    url = base_url <> path
-
     options = [headers: headers, connect_options: [timeout: 30_000]]
+    payload = payload || %{}
 
-    response =
-      case method do
-        :get -> Req.get(url, Keyword.put(options, :params, payload || %{}))
-        :post -> Req.post(url, Keyword.put(options, :json, payload || %{}))
-        :patch -> Req.patch(url, Keyword.put(options, :json, payload || %{}))
-      end
+    base_url
+    |> Kernel.<>(path)
+    |> perform_request(method, options, payload)
+    |> normalize_response()
+  end
 
+  defp perform_request(url, :get, options, payload) do
+    Req.get(url, Keyword.put(options, :params, payload))
+  end
+
+  defp perform_request(url, :post, options, payload) do
+    Req.post(url, Keyword.put(options, :json, payload))
+  end
+
+  defp perform_request(url, :patch, options, payload) do
+    Req.patch(url, Keyword.put(options, :json, payload))
+  end
+
+  defp normalize_response(response) do
     case response do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         {:ok, body}
@@ -182,29 +174,64 @@ defmodule SymphonyElixir.Tracker.GitHub.Client do
   @spec retry_after_ms([{String.t(), String.t()}]) :: non_neg_integer()
   defp retry_after_ms(headers) do
     case header_value(headers, "retry-after") do
-      nil ->
-        case header_value(headers, "x-ratelimit-reset") do
-          nil ->
-            60_000
-
-          value ->
-            case Integer.parse(value) do
-              {reset_unix, _} ->
-                now_unix = DateTime.utc_now() |> DateTime.to_unix()
-                max(reset_unix - now_unix, 1) * 1_000
-
-              _ ->
-                60_000
-            end
-        end
-
-      value ->
-        case Integer.parse(value) do
-          {seconds, _} -> max(seconds, 1) * 1_000
-          _ -> 60_000
-        end
+      nil -> retry_after_from_rate_limit_reset(headers)
+      value -> value |> parse_integer() |> seconds_to_ms()
     end
   end
+
+  defp fetch_issue_state(issue_id, base_url, owner, repo, headers) do
+    with {:ok, number} <- parse_issue_number(issue_id),
+         {:ok, issue} <- request(:get, base_url, "/repos/#{owner}/#{repo}/issues/#{number}", headers, nil) do
+      {:ok, normalize_issue(issue)}
+    else
+      {:error, :invalid_issue_id} -> :skip
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_issue_states(issue_ids, base_url, owner, repo, headers) do
+    issue_ids
+    |> Enum.uniq()
+    |> Enum.reduce_while({:ok, []}, &reduce_issue_state(&1, &2, base_url, owner, repo, headers))
+    |> reverse_issue_results()
+  end
+
+  defp reduce_issue_state(issue_id, {:ok, acc}, base_url, owner, repo, headers) do
+    case fetch_issue_state(issue_id, base_url, owner, repo, headers) do
+      {:ok, issue} -> {:cont, {:ok, [issue | acc]}}
+      :skip -> {:cont, {:ok, acc}}
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  defp reverse_issue_results({:ok, issues}), do: {:ok, Enum.reverse(issues)}
+  defp reverse_issue_results({:error, reason}), do: {:error, reason}
+
+  defp retry_after_from_rate_limit_reset(headers) do
+    case header_value(headers, "x-ratelimit-reset") do
+      nil -> default_retry_after_ms()
+      value -> value |> parse_integer() |> reset_unix_to_retry_after_ms()
+    end
+  end
+
+  defp reset_unix_to_retry_after_ms(nil), do: default_retry_after_ms()
+
+  defp reset_unix_to_retry_after_ms(reset_unix) do
+    now_unix = DateTime.utc_now() |> DateTime.to_unix()
+    max(reset_unix - now_unix, 1) * 1_000
+  end
+
+  defp seconds_to_ms(nil), do: default_retry_after_ms()
+  defp seconds_to_ms(seconds), do: max(seconds, 1) * 1_000
+
+  defp parse_integer(value) do
+    case Integer.parse(value) do
+      {integer, _} -> integer
+      _ -> nil
+    end
+  end
+
+  defp default_retry_after_ms, do: 60_000
 
   @spec header_value([{String.t(), String.t()}], String.t()) :: String.t() | nil
   defp header_value(headers, key) do

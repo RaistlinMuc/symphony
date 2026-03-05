@@ -8,6 +8,8 @@ defmodule SymphonyElixir.Project do
   @default_mode "build_only"
   @default_build_timeout_ms 900_000
 
+  alias SymphonyElixir.Tracker.GitHub.Auth, as: GitHubAuth
+
   defstruct [
     :id,
     :name,
@@ -290,11 +292,13 @@ defmodule SymphonyElixir.Project do
     do: %{"watch_reviews" => true, "watch_commits" => true, "watch_checks" => true}
 
   defp provider_missing(missing_fields, %__MODULE__{provider: "github", provider_config: provider_config}) do
+    token_env = provider_config["token_env"] || "GITHUB_TOKEN"
+
     missing_fields
     |> maybe_add_missing(blank?(provider_config["owner"]), "provider_config.owner")
     |> maybe_add_missing(blank?(provider_config["repo"]), "provider_config.repo")
-    |> maybe_add_missing(blank?(provider_config["token_env"]), "provider_config.token_env")
-    |> maybe_add_missing(blank?(System.get_env(provider_config["token_env"] || "")), "provider_config.token")
+    |> maybe_add_missing(blank?(token_env), "provider_config.token_env")
+    |> maybe_add_missing(not GitHubAuth.available?(token_env), "provider_config.token")
   end
 
   defp provider_missing(missing_fields, %__MODULE__{provider: "gitlab", provider_config: provider_config}) do

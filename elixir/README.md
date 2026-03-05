@@ -69,6 +69,9 @@ Typical missing field:
 That means the configured environment variable (for example `GITHUB_TOKEN` or `GITLAB_TOKEN`) is
 not set in the running Symphony process environment.
 
+For GitHub projects in this fork, Symphony also falls back to `gh auth token` when the GitHub CLI
+is already logged in locally.
+
 Example startup with tokens:
 
 ```bash
