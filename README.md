@@ -27,8 +27,11 @@ Implemented additions:
 Notes:
 
 - Legacy Linear-based single-workflow mode remains available.
-- In the current fork state, `build_only` is fully wired. `full_agent` is present as a mode and
-  config path and currently executes the same build job pipeline.
+- `build_only` runs configured build/test commands and posts the result back to the tracked issue.
+- `full_agent` now launches a real Codex issue run in an isolated workspace clone and posts the
+  generated issue reply back to GitHub or GitLab.
+- Trigger labels such as `todo` are removed automatically after a run finishes to avoid retry
+  loops and comment spam.
 
 ## Running Symphony
 

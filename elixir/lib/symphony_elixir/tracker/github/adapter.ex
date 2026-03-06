@@ -15,6 +15,9 @@ defmodule SymphonyElixir.Tracker.GitHub.Adapter do
   @spec create_comment(Project.t(), String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(%Project{} = project, issue_id, body), do: Client.create_comment(project, issue_id, body)
 
+  @spec replace_labels(Project.t(), String.t(), [String.t()]) :: :ok | {:error, term()}
+  def replace_labels(%Project{} = project, issue_id, labels), do: Client.replace_labels(project, issue_id, labels)
+
   @spec update_issue_state(Project.t(), String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(%Project{} = project, issue_id, state_name),
     do: Client.update_issue_state(project, issue_id, state_name)

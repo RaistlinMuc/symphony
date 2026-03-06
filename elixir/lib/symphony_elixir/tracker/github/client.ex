@@ -38,6 +38,19 @@ defmodule SymphonyElixir.Tracker.GitHub.Client do
     end
   end
 
+  @spec replace_labels(Project.t(), String.t(), [String.t()]) :: :ok | {:error, term()}
+  def replace_labels(%Project{} = project, issue_id, labels)
+      when is_binary(issue_id) and is_list(labels) do
+    with {:ok, _token, headers, base_url, owner, repo} <- request_context(project),
+         {:ok, number} <- parse_issue_number(issue_id),
+         {:ok, _} <-
+           request(:patch, base_url, "/repos/#{owner}/#{repo}/issues/#{number}", headers, %{
+             "labels" => labels
+           }) do
+      :ok
+    end
+  end
+
   @spec update_issue_state(Project.t(), String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(%Project{} = project, issue_id, state_name)
       when is_binary(issue_id) and is_binary(state_name) do

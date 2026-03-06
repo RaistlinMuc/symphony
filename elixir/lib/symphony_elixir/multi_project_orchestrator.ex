@@ -6,7 +6,7 @@ defmodule SymphonyElixir.MultiProjectOrchestrator do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Config, Project, ProjectRegistry, Tracker}
+  alias SymphonyElixir.{Config, MultiProjectAgentRunner, Project, ProjectRegistry, Tracker}
   alias SymphonyElixir.Tracker.Issue
 
   @default_retry_after_ms 60_000
@@ -275,13 +275,28 @@ defmodule SymphonyElixir.MultiProjectOrchestrator do
   end
 
   @spec run_issue_job(Project.t(), Issue.t()) :: {:ok, String.t()} | {:error, term()}
+  defp run_issue_job(%Project{mode: "full_agent"} = project, %Issue{} = issue) do
+    with {:ok, agent_result} <- MultiProjectAgentRunner.run(project, issue),
+         :ok <- post_full_agent_comment(project, issue, agent_result.comment_body) do
+      maybe_clear_trigger_labels(project, issue)
+      {:ok, agent_result.summary}
+    else
+      {:error, reason} ->
+        _ = post_failure_comment(project, issue, reason)
+        maybe_clear_trigger_labels(project, issue)
+        {:error, reason}
+    end
+  end
+
   defp run_issue_job(%Project{} = project, %Issue{} = issue) do
     with {:ok, build_result} <- run_build(project),
          :ok <- post_result_comment(project, issue, build_result) do
+      maybe_clear_trigger_labels(project, issue)
       {:ok, build_result.summary}
     else
       {:error, reason} ->
         _ = post_failure_comment(project, issue, reason)
+        maybe_clear_trigger_labels(project, issue)
         {:error, reason}
     end
   end
@@ -291,6 +306,21 @@ defmodule SymphonyElixir.MultiProjectOrchestrator do
     commands = Map.get(project.build, "commands", [])
     timeout_ms = Map.get(project.build, "timeout_ms", 900_000)
     build_result(commands, build_working_dir(project), timeout_ms)
+  end
+
+  @spec run_command_for_test(String.t(), String.t(), non_neg_integer()) :: {:ok, String.t()} | {:error, term()}
+  def run_command_for_test(command, working_dir, timeout_ms) do
+    run_command(command, working_dir, timeout_ms)
+  end
+
+  @spec issue_signature_for_test(Issue.t()) :: String.t()
+  def issue_signature_for_test(%Issue{} = issue) do
+    issue_signature(issue)
+  end
+
+  @spec track_issues_for_test(map(), [Issue.t()]) :: map()
+  def track_issues_for_test(existing, issues) when is_map(existing) and is_list(issues) do
+    track_issues(existing, issues)
   end
 
   defp build_result([], _working_dir, _timeout_ms) do
@@ -325,20 +355,29 @@ defmodule SymphonyElixir.MultiProjectOrchestrator do
 
   @spec run_command(String.t(), String.t(), non_neg_integer()) :: {:ok, String.t()} | {:error, term()}
   defp run_command(command, working_dir, timeout_ms) do
-    {output, status} =
-      System.cmd("bash", ["-lc", command],
-        cd: working_dir,
-        stderr_to_stdout: true,
-        timeout: timeout_ms
-      )
+    task =
+      Task.async(fn ->
+        try do
+          case System.cmd("bash", ["-lc", command], cd: working_dir, stderr_to_stdout: true) do
+            {output, 0} ->
+              {:ok, output}
 
-    if status == 0 do
-      {:ok, output}
-    else
-      {:error, {:exit_status, status, truncate_output(output)}}
+            {output, status} ->
+              {:error, {:exit_status, status, truncate_output(output)}}
+          end
+        rescue
+          error -> {:error, {:command_error, error}}
+        end
+      end)
+
+    case Task.yield(task, timeout_ms) do
+      {:ok, result} ->
+        result
+
+      nil ->
+        _ = Task.shutdown(task, :brutal_kill)
+        {:error, {:command_timeout, timeout_ms}}
     end
-  rescue
-    error -> {:error, {:command_error, error}}
   end
 
   @spec post_result_comment(
@@ -381,6 +420,14 @@ defmodule SymphonyElixir.MultiProjectOrchestrator do
     Tracker.Router.create_comment(project, issue.id, body)
   end
 
+  @spec post_full_agent_comment(Project.t(), Issue.t(), String.t()) :: :ok | {:error, term()}
+  defp post_full_agent_comment(project, issue, body)
+       when is_binary(body) do
+    Logger.info("posting full-agent issue comment project_id=#{project.id} issue_id=#{issue.id} bytes=#{byte_size(body)}")
+
+    Tracker.Router.create_comment(project, issue.id, body)
+  end
+
   @spec filter_candidate_issues([Issue.t()], Project.t()) :: [Issue.t()]
   defp filter_candidate_issues(issues, %Project{} = project) do
     active_states = project |> Project.active_states() |> Enum.map(&normalize_state/1) |> MapSet.new()
@@ -411,17 +458,45 @@ defmodule SymphonyElixir.MultiProjectOrchestrator do
     end)
   end
 
+  @spec maybe_clear_trigger_labels(Project.t(), Issue.t()) :: :ok
+  defp maybe_clear_trigger_labels(%Project{} = project, %Issue{} = issue) do
+    include_labels = MapSet.new(Project.labels_include(project))
+
+    if MapSet.size(include_labels) == 0 do
+      :ok
+    else
+      remaining_labels =
+        issue.labels
+        |> Enum.reject(&MapSet.member?(include_labels, String.downcase(&1)))
+
+      case Tracker.Router.replace_labels(project, issue.id, remaining_labels) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("failed to clear trigger labels project_id=#{project.id} issue_id=#{issue.id} reason=#{inspect(reason)}")
+
+          :ok
+      end
+    end
+  end
+
   @spec track_issues(map(), [Issue.t()]) :: map()
-  defp track_issues(existing, issues) when is_map(existing) do
-    Enum.reduce(issues, existing, fn issue, acc ->
-      Map.put(acc, issue.id, issue_signature(issue))
-    end)
+  defp track_issues(_existing, issues) do
+    Map.new(issues, fn issue -> {issue.id, issue_signature(issue)} end)
   end
 
   @spec issue_signature(Issue.t()) :: String.t()
   defp issue_signature(%Issue{} = issue) do
-    updated = iso8601(issue.updated_at) || ""
-    updated <> "|" <> normalize_state(issue.state)
+    [
+      normalize_state(issue.state),
+      Atom.to_string(issue.source || :issue),
+      issue.title || "",
+      issue.description || "",
+      issue.branch_name || "",
+      issue.labels |> Enum.map(&String.downcase/1) |> Enum.sort() |> Enum.join(",")
+    ]
+    |> Enum.join("|")
   end
 
   @spec put_project_state(State.t(), String.t(), map()) :: State.t()
