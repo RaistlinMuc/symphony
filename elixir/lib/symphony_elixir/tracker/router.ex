@@ -21,6 +21,11 @@ defmodule SymphonyElixir.Tracker.Router do
     adapter(project).create_comment(project, issue_id, body)
   end
 
+  @spec replace_labels(Project.t(), String.t(), [String.t()]) :: :ok | {:error, term()}
+  def replace_labels(%Project{} = project, issue_id, labels) when is_list(labels) do
+    adapter(project).replace_labels(project, issue_id, labels)
+  end
+
   @spec update_issue_state(Project.t(), String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(%Project{} = project, issue_id, state_name) do
     adapter(project).update_issue_state(project, issue_id, state_name)

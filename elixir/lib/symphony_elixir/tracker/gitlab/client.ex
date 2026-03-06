@@ -38,6 +38,17 @@ defmodule SymphonyElixir.Tracker.GitLab.Client do
     end
   end
 
+  @spec replace_labels(Project.t(), String.t(), [String.t()]) :: :ok | {:error, term()}
+  def replace_labels(%Project{} = project, issue_id, labels)
+      when is_binary(issue_id) and is_list(labels) do
+    with {:ok, headers, base_url, project_ref} <- request_context(project),
+         {:ok, type, iid} <- parse_issue_key(issue_id),
+         path <- update_path(project_ref, type, iid),
+         {:ok, _} <- request(:put, base_url, path, headers, %{"labels" => Enum.join(labels, ",")}) do
+      :ok
+    end
+  end
+
   @spec update_issue_state(Project.t(), String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(%Project{} = project, issue_id, state_name)
       when is_binary(issue_id) and is_binary(state_name) do

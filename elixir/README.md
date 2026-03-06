@@ -83,9 +83,28 @@ mise exec -- ./bin/symphony ./WORKFLOW.md --port 4100 --i-understand-that-this-w
 ### Fork status and current limitations
 
 - `build_only` mode is fully implemented (poll -> build commands -> post result comment).
-- `full_agent` is available as a project mode/config value and currently runs through the same
-  build job path in this fork revision.
+- `full_agent` mode is fully wired for GitHub and GitLab issue polling:
+  - Symphony clones the tracked repository into an isolated workspace
+  - launches Codex in that workspace
+  - instructs Codex to write the exact issue reply into `.symphony/issue_comment.md`
+  - then posts that markdown back to the source issue
+- Trigger labels such as `todo` are removed automatically after each run to prevent repeated
+  re-processing of the same issue.
 - The existing Linear single-workflow path remains available for legacy usage.
+
+### Typical GitHub flow in this fork
+
+1. Add a monitored project for your repository.
+2. Set `mode` to `full_agent`.
+3. Add a trigger label filter such as `todo`.
+4. Open an issue and apply the `todo` label.
+5. Symphony polls the issue, runs Codex in an isolated workspace clone, then posts the generated
+   markdown reply back to the issue.
+
+For GitHub, Symphony can authenticate with either:
+
+- `GITHUB_TOKEN` in the Symphony process environment
+- or the local GitHub CLI session via `gh auth token`
 
 ## How to use it
 
